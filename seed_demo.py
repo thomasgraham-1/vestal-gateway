@@ -22,7 +22,7 @@ def ingest(agent, model, calls, lo, hi, corr=""):
         gateway.record(agent, f"{agent}-{corr or 'run'}", model, model, "FORWARD", it, ot, "")
 
 
-if __name__ == "__main__":
+def seed():
     if os.path.exists(gateway.DB):
         os.remove(gateway.DB)
     gateway._db()
@@ -46,6 +46,10 @@ if __name__ == "__main__":
     for i in range(11):
         gateway.record("code_reviewer", "code_reviewer-pr-204", "claude-opus-4-8", "claude-opus-4-8",
                        "FORWARD", 6000, 400, "loop" if i > 4 else "", tool="read_file:diff.patch")
+    return gateway.DB
 
+
+if __name__ == "__main__":
+    seed()
     print("seeded demo fleet ->", gateway.DB)
     print("next: python3 adduser.py admin admin admin && python3 gateway.py")

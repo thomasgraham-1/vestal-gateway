@@ -470,6 +470,15 @@ def serve(port=8788, host="127.0.0.1"):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8788))          # container platforms inject PORT
     host = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
+    if os.environ.get("VESTAL_DEMO"):                 # one-shot demo: seed fictional fleet + an admin login
+        try:
+            import seed_demo
+            seed_demo.seed()
+            create_user(os.environ.get("VESTAL_DEMO_USER", "admin"),
+                        os.environ.get("VESTAL_DEMO_PASS", "admin"), "admin")
+            print("[demo] seeded fleet + admin login", flush=True)
+        except Exception as e:
+            print("[demo] seed skipped:", e, flush=True)
     serve(port, host)
     print(f"vestal gateway on {host}:{port}  (dashboard at /)  upstream={'REAL' if API_KEY else 'MOCK'}  secure={SECURE}", flush=True)
     while True:
