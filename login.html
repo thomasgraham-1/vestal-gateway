@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Vestal — sign in</title>
+<style>
+  :root{--bg:#08090B;--panel:#0B0D10;--line:#1B1E22;--txt:#ECEEF1;--txt2:#9AA0A8;--mut:#565C64;--sig:#C9605A;
+        --mono:ui-monospace,"SF Mono",Menlo,monospace;--sans:ui-sans-serif,system-ui,-apple-system,sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{width:340px;border:1px solid var(--line);background:var(--panel);border-radius:12px;overflow:hidden}
+  .head{padding:16px 20px;border-bottom:1px solid var(--line)}
+  .brand{font-family:var(--mono);font-weight:600;letter-spacing:.18em;font-size:15px}
+  .sub{font-size:10px;letter-spacing:.15em;color:var(--mut);text-transform:uppercase;margin-top:3px}
+  form{padding:20px}
+  label{font-size:10px;letter-spacing:.14em;color:var(--mut);text-transform:uppercase;display:block;margin-bottom:5px}
+  input{width:100%;background:#11141A;border:1px solid #2A2F35;color:var(--txt);font-family:var(--mono);font-size:13px;padding:9px 10px;margin-bottom:14px;border-radius:6px}
+  input:focus{outline:none;border-color:#3a4046}
+  button{width:100%;background:var(--txt);color:#08090B;border:none;font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;padding:10px;border-radius:6px;cursor:pointer;font-weight:600}
+  button:hover{background:#C9CDD3}
+  .err{color:var(--sig);font-family:var(--mono);font-size:11px;margin-bottom:12px;display:none}
+</style>
+<div class="card">
+  <div class="head"><div class="brand">VESTAL</div><div class="sub">Agent fleet telemetry</div></div>
+  <form method="POST" action="/login">
+    <div class="err" id="err">Invalid credentials</div>
+    <label>Username</label><input name="username" autocomplete="username" autofocus>
+    <label>Password</label><input name="password" type="password" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+<script>if(location.search.indexOf('e=1')>=0)document.getElementById('err').style.display='block';</script>

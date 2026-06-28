@@ -1,0 +1,183 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Vestal — agent fleet telemetry</title>
+<style>
+  :root{--bg:#08090B;--panel:#0B0D10;--line:#1B1E22;--line2:#141619;--txt:#ECEEF1;--txt2:#9AA0A8;--mut:#565C64;
+        --bar:#34383E;--barhi:#E2E5E9;--sig:#C9605A;
+        --mono:ui-monospace,"SF Mono",Menlo,monospace;--sans:ui-sans-serif,system-ui,-apple-system,sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:13px}
+  .wrap{max-width:1100px;margin:0 auto;border-left:1px solid var(--line);border-right:1px solid var(--line);min-height:100vh}
+  .upper{font-size:10px;letter-spacing:.15em;color:var(--mut);text-transform:uppercase}
+  .mono{font-family:var(--mono)}
+  header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .brand{font-family:var(--mono);font-weight:600;letter-spacing:.18em;color:var(--txt);font-size:14px}
+  .stat{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  .readouts{display:grid;grid-template-columns:repeat(5,1fr)}
+  .ro{padding:14px 16px;border-right:1px solid var(--line2)}
+  .ro .v{font-family:var(--mono);font-size:22px;margin-top:5px;color:var(--txt)}
+  .body{display:grid;grid-template-columns:40% 60%;border-top:1px solid var(--line)}
+  .chan{border-right:1px solid var(--line);padding:12px 0}
+  .chrow{display:flex;align-items:center;gap:8px;padding:6px 16px;font-family:var(--mono);font-size:12px}
+  .chbar{height:3px;margin-bottom:4px}
+  .chan-item{cursor:pointer}
+  .chan-item:hover{background:#0F1216}
+  .back{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--txt2);cursor:pointer;background:none;border:1px solid #2A2F35;padding:4px 10px;text-transform:uppercase}
+  .back:hover{color:var(--txt);border-color:#3a4046}
+  .chip{font-family:var(--mono);font-size:11px;color:var(--txt2)}
+  .chip b{color:var(--txt);font-weight:600}
+  .strace{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+  .strace td,.strace th{padding:4px 16px;border-bottom:1px solid var(--line2);text-align:left}
+  .strace th{color:var(--mut);font-weight:400;letter-spacing:.08em;text-transform:uppercase}
+  .sec{padding:12px 16px 6px;border-top:1px solid var(--line2)}
+  .ev{display:flex;gap:10px;padding:3px 16px;font-family:var(--mono);font-size:11px}
+  .ev .t{color:#3C424A}
+  .rec{border-top:1px solid var(--line);padding:11px 16px;background:var(--panel)}
+</style>
+<div class="wrap">
+  <header>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span class="brand">VESTAL</span><span class="upper">Agent fleet telemetry</span>
+      <select id="viewas" style="background:#11141A;color:var(--txt);border:1px solid #2A2F35;font-family:var(--mono);font-size:11px;padding:3px 6px"></select>
+    </div>
+    <div class="stat"><span class="dot" id="sdot"></span><span id="sstat">—</span>
+      <span class="mono" id="clk" style="color:#3C424A;margin-left:8px"></span>
+      <span class="mono" id="me" style="color:var(--txt2);margin-left:12px"></span>
+      <a href="/logout" class="mono" style="color:var(--mut);margin-left:10px;text-decoration:none;text-transform:uppercase;font-size:10px;letter-spacing:.1em">Logout</a></div>
+  </header>
+  <div class="readouts">
+    <div class="ro"><div class="upper">Fleet spend</div><div class="v" id="r_cost">—</div></div>
+    <div class="ro"><div class="upper">Model calls</div><div class="v" id="r_calls">—</div></div>
+    <div class="ro"><div class="upper">Tokens</div><div class="v" id="r_tok">—</div></div>
+    <div class="ro"><div class="upper">Control actions</div><div class="v" id="r_valve">—</div></div>
+    <div class="ro" style="border-right:none"><div class="upper">Recoverable</div><div class="v" id="r_rec">—</div></div>
+  </div>
+  <div class="body">
+    <div class="chan"><div class="upper" style="padding:0 16px 8px">Channels · spend</div><div id="chan"></div></div>
+    <div>
+      <div class="upper" style="padding:12px 16px 4px">Fleet $ / call</div>
+      <svg id="plot" viewBox="0 0 460 120" style="width:100%;display:block"></svg>
+      <div class="sec upper">Off-nominal event log</div>
+      <div id="events" style="padding-bottom:10px"></div>
+    </div>
+  </div>
+  <div class="rec" id="ctrlpanel" style="display:none"><div class="upper" style="margin-bottom:7px">Gateway controls · admin — changes apply live</div><div id="controls" style="display:flex;flex-wrap:wrap;gap:7px"></div></div>
+  <div id="detail" style="display:none"></div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const usd=n=>'$'+Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const usd3=n=>'$'+Number(n).toFixed(3);
+const num=n=>Number(n).toLocaleString();
+const tok=n=>n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(0)+'k':n;
+const T0=Date.now();
+setInterval(()=>{const s=Math.floor((Date.now()-T0)/1000);$('#clk').textContent='T+ '+String(Math.floor(s/3600)).padStart(2,'0')+':'+String(Math.floor(s/60)%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0')},1000);
+
+const EVLABEL={runaway_loop:'LOOP_KILL',downgraded:'MODEL_SWAP',cache_saved:'CACHE_HIT',loop:'REDUNDANT_READ'};
+let VIEW='admin', IS_ADMIN=false;
+async function ctrl(payload){await fetch('/v_control',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});tick();}
+function cbtn(label,state,on,onclick){return `<button onclick="${onclick}" style="font-family:var(--mono);font-size:11px;border:1px solid #2A2F35;border-left:2px solid ${on?'var(--txt)':'var(--mut)'};background:#11141A;color:var(--txt2);padding:4px 10px;cursor:pointer">${label}: <b style="color:${on?'var(--txt)':'var(--mut)'}">${state}</b></button>`;}
+async function tick(){
+  const q='?as='+encodeURIComponent(VIEW);
+  const s=await (await fetch('/v_stats'+q)).json();
+  const t=await (await fetch('/v_traces'+q)).json();
+  const waste=Object.fromEntries(s.by_waste.map(w=>[w.kind,w.cost]));
+  const rec=((waste.loop||0)+(waste.runaway_loop||0))/(s.cost||1);
+  $('#r_cost').textContent=usd(s.cost);$('#r_calls').textContent=num(s.calls);
+  $('#r_tok').textContent=tok(s.tokens);$('#r_valve').textContent=num(s.saved_actions);
+  $('#r_rec').textContent=Math.round(rec*100)+'%';$('#r_rec').style.color=rec>0.3?'var(--sig)':'var(--txt)';
+  $('#sdot').style.background=rec>0.3?'var(--sig)':'var(--txt2)';
+  $('#sstat').textContent=rec>0.3?Math.round(rec*100)+'% recoverable waste':'fleet nominal';
+  $('#sstat').style.color=rec>0.3?'var(--sig)':'var(--txt2)';
+
+  const maxc=Math.max(...s.by_agent.map(a=>a.cost),1e-9);
+  $('#chan').innerHTML=s.by_agent.map(a=>{
+    const share=a.cost/s.cost;const offn=share>0.4;
+    return `<div class="chan-item" data-agent="${a.agent}"><div class="chrow">
+      <span style="flex:1;color:${offn?'var(--txt)':'var(--txt2)'}">${a.agent}</span><span style="color:var(--txt2)">${usd3(a.cost)}</span></div>
+      <div class="chbar" style="background:${offn?'var(--barhi)':'var(--bar)'};width:${Math.max(1.5,100*a.cost/maxc)}%"></div></div>`}).join('');
+
+  const costs=t.slice().reverse().map(r=>r.cost);const mx=Math.max(...costs,1e-9);const W=460,H=120;
+  const pts=costs.map((c,i)=>[i/(Math.max(costs.length-1,1))*W, H-10-(c/mx)*(H-30)]);
+  const peak=pts[costs.indexOf(mx)]||[0,0];
+  const line=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(0)+' '+p[1].toFixed(0)).join(' ');
+  $('#plot').innerHTML=`<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.10"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient></defs>
+    <line x1="0" y1="30" x2="460" y2="30" stroke="#141619"/><line x1="0" y1="60" x2="460" y2="60" stroke="#141619"/><line x1="0" y1="90" x2="460" y2="90" stroke="#141619"/>
+    <path d="${line}" fill="none" stroke="#C9CDD3" stroke-width="1.5"/>
+    <path d="${line} L${W} ${H} L0 ${H} Z" fill="url(#g)"/>
+    <circle cx="${peak[0].toFixed(0)}" cy="${peak[1].toFixed(0)}" r="3.5" fill="#C9605A"/>
+    <text x="${Math.min(peak[0]+6,360).toFixed(0)}" y="${Math.max(peak[1]-4,10).toFixed(0)}" fill="#C9605A" font-family="ui-monospace,monospace" font-size="9">PEAK</text>`;
+
+  const evs=t.filter(r=>r.waste in EVLABEL).slice(0,6);
+  $('#events').innerHTML=evs.map(r=>{const label=EVLABEL[r.waste];const crit=r.waste==='runaway_loop';
+    return `<div class="ev"><span class="t">${r.action}</span><span style="color:${crit?'var(--sig)':'var(--txt2)'};width:130px">${label}</span><span style="color:var(--mut)">${r.agent}${r.model_in!==r.model_out?' · '+r.model_in+'→'+r.model_out:''}</span></div>`}).join('')||'<div class="ev" style="color:var(--mut)">no off-nominal events</div>';
+
+  if(IS_ADMIN){
+    const cfg=await (await fetch('/v_config')).json();
+    const lk=cfg.loop_kill, ca=cfg.cache, sw=Object.keys(cfg.route_map||{}).length;
+    $('#controls').innerHTML=
+      cbtn('Loop-kill', lk?('on @'+lk):'off', !!lk, 'ctrl({loop_kill:'+(lk?'null':'8')+'})')+
+      cbtn('Cache', ca?'on':'off', ca, 'ctrl({cache:'+(!ca)+'})')+
+      cbtn('Model routing', sw?(sw+' active'):'off', !!sw, sw?'ctrl({route_map:{}})':`ctrl({route_map:{'claude-opus-4-8':'claude-haiku-4-5'}})`);
+    $('#ctrlpanel').style.display='block';
+  }
+}
+function svgLine(vals,label){
+  const W=460,H=120,mx=Math.max(...vals,1e-9);
+  const pts=vals.map((v,i)=>[i/(Math.max(vals.length-1,1))*W,H-12-(v/mx)*(H-30)]);
+  const peak=pts[vals.indexOf(mx)]||[0,0];
+  const line=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(0)+' '+p[1].toFixed(0)).join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;display:block">
+    <defs><linearGradient id="gd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.10"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient></defs>
+    <line x1="0" y1="40" x2="460" y2="40" stroke="#141619"/><line x1="0" y1="75" x2="460" y2="75" stroke="#141619"/>
+    <path d="${line}" fill="none" stroke="#C9CDD3" stroke-width="1.5"/><path d="${line} L${W} ${H} L0 ${H} Z" fill="url(#gd)"/>
+    <circle cx="${peak[0].toFixed(0)}" cy="${peak[1].toFixed(0)}" r="3.5" fill="#C9605A"/>
+    <text x="${Math.min(peak[0]+6,330).toFixed(0)}" y="${Math.max(peak[1]-4,11).toFixed(0)}" fill="#C9605A" font-family="ui-monospace,monospace" font-size="9">${label}</text></svg>`;
+}
+async function showDetail(agent){
+  const c=await (await fetch('/v_channel?agent='+encodeURIComponent(agent))).json();
+  const turns=(c.detail&&c.detail.turns)||[];
+  const ctx=turns.map(t=>t.in), tot=turns.map(t=>t.in+t.out);
+  const maxbar=Math.max(...tot,1); const seen={};
+  const rows=turns.map((t,i)=>{const rep=t.tool&&seen[t.tool];if(t.tool)seen[t.tool]=1;
+    return `<tr><td style="color:var(--mut)">${String(i+1).padStart(2,'0')}</td>
+      <td style="color:${t.action==='LOOP_KILL'?'var(--sig)':'var(--txt2)'}">${t.action}</td>
+      <td style="color:var(--txt2)">${t.model||''}</td>
+      <td style="color:${rep?'var(--sig)':'var(--txt2)'}">${t.tool||'—'}${rep?' ◂ repeat':''}</td>
+      <td style="color:var(--txt);text-align:right">${(t.in).toLocaleString()}</td>
+      <td style="color:var(--txt2);text-align:right">${t.out}</td></tr>`}).join('');
+  const grow=ctx.length>1&&ctx[0]>0?(ctx[ctx.length-1]/ctx[0]).toFixed(1)+'×':'—';
+  document.querySelector('.body').style.display='none';$('#ctrlpanel').style.display='none';
+  const d=document.getElementById('detail');d.style.display='block';
+  d.innerHTML=`
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 16px;border-bottom:1px solid var(--line);background:var(--panel)">
+    <div style="display:flex;align-items:center;gap:12px"><button class="back" onclick="showFleet()">← Fleet</button>
+      <span class="mono" style="font-size:14px;letter-spacing:.06em">CHANNEL · ${agent}</span></div>
+    <div style="display:flex;gap:18px">
+      <span class="chip">RUNS <b>${c.runs}</b></span><span class="chip">AVG CALLS/RUN <b>${c.avg_turns}</b></span>
+      <span class="chip">PEAK CTX <b>${c.peak.toLocaleString()}</b></span><span class="chip">SPEND <b>$${c.cost.toFixed(3)}</b></span></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)">
+    <div style="border-right:1px solid var(--line)"><div class="upper" style="padding:12px 16px 2px">Context size / turn · grows ${grow}</div>${svgLine(ctx,'PEAK CONTEXT')}</div>
+    <div><div class="upper" style="padding:12px 16px 2px">Tokens / turn</div>
+      <div style="display:flex;align-items:flex-end;gap:3px;height:120px;padding:8px 16px 12px">${tot.map(v=>`<div style="flex:1;background:var(--bar);height:${Math.max(3,100*v/maxbar)}%"></div>`).join('')}</div></div>
+  </div>
+  <div class="upper" style="padding:12px 16px 6px">Step trace · longest run (${turns.length} calls)</div>
+  <table class="strace"><tr><th>#</th><th>Action</th><th>Model</th><th>Tool</th><th style="text-align:right">In</th><th style="text-align:right">Out</th></tr>${rows}</table>`;
+}
+function showFleet(){document.getElementById('detail').style.display='none';document.querySelector('.body').style.display='grid';if(IS_ADMIN)$('#ctrlpanel').style.display='block';tick();}
+document.getElementById('chan').addEventListener('click',e=>{const it=e.target.closest('.chan-item');if(it)showDetail(it.dataset.agent);});
+(async()=>{const me=await (await fetch('/v_me')).json();
+  IS_ADMIN=me.is_admin;
+  document.getElementById('me').textContent=me.username+(me.is_admin?' · admin':'');
+  const org=await (await fetch('/v_org')).json();
+  const labels={admin:'whole org'};org.owners.forEach(o=>labels[o.owner]=o.owner);
+  const sel=document.getElementById('viewas');
+  sel.innerHTML=org.you_can_view.map(v=>`<option value="${v}">${labels[v]||v}</option>`).join('');
+  if(!me.is_admin){sel.style.display='none';VIEW=me.role;}  // non-admins are locked to their scope
+  tick();
+})();
+document.getElementById('viewas').addEventListener('change',e=>{VIEW=e.target.value;showFleet();});
+setInterval(()=>{if(document.getElementById('detail').style.display==='none')tick();},3000);
+</script>

@@ -1,0 +1,21 @@
+# local trace store
+vestal.db
+*.sqlite
+*.sqlite3
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# env / secrets — never commit
+.env
+.env.*
+
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
