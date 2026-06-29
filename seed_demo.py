@@ -58,6 +58,22 @@ def seed():
         gateway.record("code_reviewer", "code_reviewer-pr-204", "claude-opus-4-8", "claude-opus-4-8",
                        "FORWARD", 6000, 400, "loop" if i > 4 else "", tool="read_file:diff.patch",
                        dur=_dur("claude-opus-4-8", 400))
+
+    # --- an orchestrator that fans out to sub-agents: a nested observation tree.
+    #     A planning span (r0) spawns generations and a web-research sub-agent span
+    #     (s1) with its own child generations; cost/tokens/dur roll up to the root. ---
+    def obs(model, in_tok, out_tok, oid, parent="", kind="generation", action="FORWARD", tool=""):
+        gateway.record("research_lead", "research_lead-q3-report", model, model, action, in_tok, out_tok, "",
+                       tool, "", "", _dur(model, out_tok) if kind == "generation" else 0.0, oid, parent, kind)
+
+    obs("orchestrator", 0, 0, "r0", kind="span", action="PLAN", tool="plan:q3-report")
+    obs("claude-opus-4-8", 8200, 640, "g1", parent="r0", tool="decompose")
+    obs("sub-agent", 0, 0, "s1", parent="r0", kind="span", action="SPAWN", tool="agent:web_research")
+    for i in range(4):
+        obs("gemini-3.1-flash-lite", random.randint(2000, 9000), random.randint(400, 1200),
+            f"g2_{i}", parent="s1", tool=f"read_file:source{i}.html")
+    obs("claude-haiku-4-5", 6400, 1500, "g3", parent="r0", tool="draft:section")
+    obs("claude-opus-4-8", 9800, 720, "g4", parent="r0", tool="synthesize")
     return gateway.DB
 
 

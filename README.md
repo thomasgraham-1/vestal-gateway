@@ -54,6 +54,12 @@ works fully offline.
   carries duration, so the meter surfaces **output tokens/sec** per agent and across
   the fleet — the velocity/opportunity-cost lens, not just spend. Cache hits and
   loop kills are instant (dur 0) and don't dilute it.
+- **Observation tree** — each call is an observation with an `obs_id`, a `parent_id`,
+  and a `kind` (`generation` = an LLM call, `span` = a unit of work / sub-agent,
+  `event` = an instant marker). They nest into a per-session tree and cost / tokens /
+  duration roll up it, so you see a sub-agent's full subtree cost, not just flat rows.
+  Agents declare the tree by sending `x-vestal-obs` (this call) and `x-vestal-parent`
+  (its parent) — the same run_id / parent_run_id convention orchestration frameworks use.
 - **Proxy** — Anthropic (`/v1/messages`, streaming or not) and Gemini
   (`/v1beta/models/<m>:generateContent`) compatible. Forwards to the real API
   when a key is set, otherwise mocks.

@@ -136,9 +136,23 @@ function svgLine(vals,label){
     <circle cx="${peak[0].toFixed(0)}" cy="${peak[1].toFixed(0)}" r="3.5" fill="#C9605A"/>
     <text x="${Math.min(peak[0]+6,330).toFixed(0)}" y="${Math.max(peak[1]-4,11).toFixed(0)}" fill="#C9605A" font-family="ui-monospace,monospace" font-size="9">${label}</text></svg>`;
 }
+// the observation tree: indent by depth, show each node's subtree roll-up (Σ tokens / Σ cost / tok/s)
+function treeRows(nodes,depth){return (nodes||[]).map(n=>{
+  const kc={span:'#9AA0A8',generation:'#C9CDD3',event:'#565C64',tool:'#C9605A'}[n.kind]||'#9AA0A8';
+  const r=n.roll||{};const has=n.children&&n.children.length;
+  return `<tr><td style="padding-left:${16+depth*18}px;color:${kc}">${has?'▸ ':'· '}${n.kind}</td>
+    <td style="color:var(--txt2)">${n.tool||n.model||n.action}</td>
+    <td style="color:var(--txt);text-align:right">${(r.tok||0).toLocaleString()}</td>
+    <td style="color:var(--txt2);text-align:right">$${(r.cost||0).toFixed(3)}</td>
+    <td style="color:var(--txt2);text-align:right">${r.dur>0?Math.round(r.out/r.dur):'—'}</td></tr>`
+    +treeRows(n.children,depth+1)}).join('');}
 async function showDetail(agent){
   const c=await (await fetch('/v_channel?agent='+encodeURIComponent(agent))).json();
   const turns=(c.detail&&c.detail.turns)||[];
+  const tree=(c.detail&&c.detail.tree)||[];
+  const nested=tree.some(n=>n.children&&n.children.length);
+  const treeBlock=nested?`<div class="upper" style="padding:12px 16px 6px">Observation tree · subtree roll-up</div>
+    <table class="strace"><tr><th>Observation</th><th>Label</th><th style="text-align:right">Σ tokens</th><th style="text-align:right">Σ cost</th><th style="text-align:right">tok/s</th></tr>${treeRows(tree,0)}</table>`:'';
   const ctx=turns.map(t=>t.in), tot=turns.map(t=>t.in+t.out);
   const maxbar=Math.max(...tot,1); const seen={};
   const rows=turns.map((t,i)=>{const rep=t.tool&&seen[t.tool];if(t.tool)seen[t.tool]=1;
@@ -165,6 +179,7 @@ async function showDetail(agent){
     <div><div class="upper" style="padding:12px 16px 2px">Tokens / turn</div>
       <div style="display:flex;align-items:flex-end;gap:3px;height:120px;padding:8px 16px 12px">${tot.map(v=>`<div style="flex:1;background:var(--bar);height:${Math.max(3,100*v/maxbar)}%"></div>`).join('')}</div></div>
   </div>
+  ${treeBlock}
   <div class="upper" style="padding:12px 16px 6px">Step trace · longest run (${turns.length} calls)</div>
   <table class="strace"><tr><th>#</th><th>Action</th><th>Model</th><th>Tool</th><th style="text-align:right">In</th><th style="text-align:right">Out</th><th style="text-align:right">tok/s</th></tr>${rows}</table>`;
 }

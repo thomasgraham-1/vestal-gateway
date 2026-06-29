@@ -52,7 +52,7 @@ SECURE = bool(os.environ.get("VESTAL_SECURE"))  # set in production (HTTPS) for 
 # the virtual-key registry (see create_key); here it scopes the dashboard so an
 # 'admin' sees the whole org and a non-admin is locked to their own agents.
 ORG = {
-    "alex · data":     ["web_scraper", "report_writer", "weekly_summary"],
+    "alex · data":     ["web_scraper", "report_writer", "weekly_summary", "research_lead"],
     "sam · platform":  ["code_reviewer", "doc_assistant"],
     "support team":    ["ticket_triage"],
 }
@@ -72,12 +72,18 @@ def _db():
     c.execute("""CREATE TABLE IF NOT EXISTS traces(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, agent TEXT, session TEXT,
         model_in TEXT, model_out TEXT, action TEXT, in_tok INT, out_tok INT,
-        cost REAL, waste TEXT, tool TEXT, tenant TEXT, corr TEXT, dur REAL DEFAULT 0)""")
-    # dur = wall-clock seconds the upstream call took. Captured here at the chokepoint
-    # (nowhere else can), it's what turns the meter from spend-only into a throughput
-    # meter: out_tok / dur is tokens/sec of useful output. Migrate stores that predate it.
-    if "dur" not in [r[1] for r in c.execute("PRAGMA table_info(traces)").fetchall()]:
-        c.execute("ALTER TABLE traces ADD COLUMN dur REAL DEFAULT 0")
+        cost REAL, waste TEXT, tool TEXT, tenant TEXT, corr TEXT, dur REAL DEFAULT 0,
+        obs_id TEXT, parent_id TEXT, kind TEXT DEFAULT 'generation')""")
+    # Each row is one observation. dur = wall-clock the upstream call took (only the
+    # chokepoint can measure it) -> out_tok/dur is throughput. obs_id/parent_id form an
+    # observation tree within a session (the sub-agent/tool nesting), kind tags the node
+    # (generation = an LLM call, span = a unit of work, event = an instant marker), so
+    # cost/tokens/dur roll up the tree. Migrate stores that predate any of these columns.
+    have = [r[1] for r in c.execute("PRAGMA table_info(traces)").fetchall()]
+    for col, ddl in (("dur", "dur REAL DEFAULT 0"), ("obs_id", "obs_id TEXT"),
+                     ("parent_id", "parent_id TEXT"), ("kind", "kind TEXT DEFAULT 'generation'")):
+        if col not in have:
+            c.execute("ALTER TABLE traces ADD COLUMN " + ddl)
     c.execute("""CREATE TABLE IF NOT EXISTS keys(
         vk TEXT PRIMARY KEY, tenant TEXT, team TEXT, agent TEXT, created REAL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS users(
@@ -170,16 +176,23 @@ def _cost(model, in_tok, out_tok):
     return round(in_tok / 1e6 * pin + out_tok / 1e6 * pout, 6)
 
 
-def record(agent, session, model_in, model_out, action, in_tok, out_tok, waste, tool="", tenant="", corr="", dur=0.0):
+def _oid():
+    return "obs_" + secrets.token_hex(6)
+
+
+def record(agent, session, model_in, model_out, action, in_tok, out_tok, waste, tool="", tenant="", corr="",
+           dur=0.0, obs_id="", parent_id="", kind=""):
     cost = _cost(model_out, in_tok, out_tok)
+    obs_id = obs_id or _oid()  # every observation gets a stable id so children can point at it
+    kind = kind or ("event" if action in ("LOOP_KILL", "CACHE_HIT") else "generation")
     with _lock:
         c = _db()
-        c.execute("INSERT INTO traces(ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,tool,tenant,corr,dur)"
-                  " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (time.time(), agent, session, model_in, model_out, action, in_tok, out_tok, cost, waste, tool, tenant, corr, dur))
+        c.execute("INSERT INTO traces(ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,tool,tenant,corr,dur,obs_id,parent_id,kind)"
+                  " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (time.time(), agent, session, model_in, model_out, action, in_tok, out_tok, cost, waste, tool, tenant, corr, dur, obs_id, parent_id, kind))
         c.commit(); c.close()
     tps = out_tok / dur if dur > 0 else 0
-    print(f"    [vestal] agent={agent} action={action} model={model_out} "
+    print(f"    [vestal] agent={agent} action={action} kind={kind} model={model_out} "
           f"tok={in_tok}/{out_tok} ${cost} {dur * 1000:.0f}ms {tps:.0f}tok/s waste={waste or '-'}", flush=True)
     return cost
 
@@ -236,19 +249,20 @@ def _key(body):
     return hashlib.sha256(json.dumps(sub, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
-def intercept(body, agent, session, tenant="", corr=""):
+def intercept(body, agent, session, tenant="", corr="", parent="", obs=""):
     n = _session_calls.get(session, 0) + 1
     _session_calls[session] = n
     model_in = body.get("model")
+    obs = obs or _oid()  # this call's observation id (client may supply it via x-vestal-obs)
 
     if CONFIG["loop_kill"] and n > CONFIG["loop_kill"]:
-        record(agent, session, model_in, model_in, "LOOP_KILL", 0, 0, "runaway_loop", "", tenant, corr)
+        record(agent, session, model_in, model_in, "LOOP_KILL", 0, 0, "runaway_loop", "", tenant, corr, 0.0, obs, parent)
         return _resp(model_in, [{"type": "text", "text": f"[vestal] loop terminated after {CONFIG['loop_kill']} calls"}], "end_turn", 0, 0)
 
     ck = _key(body)
     if CONFIG["cache"] and ck in _cache:
         r = _cache[ck]
-        record(agent, session, model_in, model_in, "CACHE_HIT", 0, 0, "cache_saved", "", tenant, corr)
+        record(agent, session, model_in, model_in, "CACHE_HIT", 0, 0, "cache_saved", "", tenant, corr, 0.0, obs, parent)
         return r
 
     model_out = CONFIG["route_map"].get(model_in, model_in)
@@ -261,7 +275,7 @@ def intercept(body, agent, session, tenant="", corr=""):
     tu = next((b for b in resp.get("content", []) if b.get("type") == "tool_use"), None)
     tool = f"{tu['name']}:{tu.get('input', {}).get('path', '')}" if tu else ""
     record(agent, session, model_in, model_out, "MODEL_SWAP" if model_out != model_in else "FORWARD",
-           u.get("input_tokens", 0), u.get("output_tokens", 0), waste, tool, tenant, corr, dur)
+           u.get("input_tokens", 0), u.get("output_tokens", 0), waste, tool, tenant, corr, dur, obs, parent)
     if CONFIG["cache"]:
         _cache[ck] = resp
     return resp
@@ -286,17 +300,18 @@ def _gem_real(model, body):
         return json.loads(r.read())
 
 
-def intercept_gemini(model_in, body, agent, session, tenant="", corr=""):
+def intercept_gemini(model_in, body, agent, session, tenant="", corr="", parent="", obs=""):
     n = _session_calls.get(session, 0) + 1
     _session_calls[session] = n
+    obs = obs or _oid()
 
     if CONFIG["loop_kill"] and n > CONFIG["loop_kill"]:
-        record(agent, session, model_in, model_in, "LOOP_KILL", 0, 0, "runaway_loop", "", tenant, corr)
+        record(agent, session, model_in, model_in, "LOOP_KILL", 0, 0, "runaway_loop", "", tenant, corr, 0.0, obs, parent)
         return _gem_resp(model_in, [{"text": f"[vestal] loop terminated after {CONFIG['loop_kill']} calls"}], 0, 0)
 
     ck = hashlib.sha256((model_in + json.dumps(body.get("contents", []), sort_keys=True, default=str)).encode()).hexdigest()[:12]
     if CONFIG["cache"] and ck in _cache:
-        record(agent, session, model_in, model_in, "CACHE_HIT", 0, 0, "cache_saved", "", tenant, corr)
+        record(agent, session, model_in, model_in, "CACHE_HIT", 0, 0, "cache_saved", "", tenant, corr, 0.0, obs, parent)
         return _cache[ck]
 
     model_out = CONFIG["route_map"].get(model_in, model_in)
@@ -308,13 +323,38 @@ def intercept_gemini(model_in, body, agent, session, tenant="", corr=""):
     fc = next((p["functionCall"] for p in resp["candidates"][0]["content"]["parts"] if "functionCall" in p), None)
     tool = f"{fc['name']}:{fc.get('args', {}).get('path', '')}" if fc else ""
     record(agent, session, model_in, model_out, "MODEL_SWAP" if model_out != model_in else "FORWARD",
-           u.get("promptTokenCount", 0), u.get("candidatesTokenCount", 0), waste, tool, tenant, corr, dur)
+           u.get("promptTokenCount", 0), u.get("candidatesTokenCount", 0), waste, tool, tenant, corr, dur, obs, parent)
     if CONFIG["cache"]:
         _cache[ck] = resp
     return resp
 
 
 # ---- dashboard data ----
+def _tree(nodes):
+    """Build the observation forest from a flat list of {obs,parent,...} and roll
+    cost/tokens/dur up each subtree (Langfuse-style nesting, clean-room). Rows with a
+    blank/unknown parent are roots, so flat pre-nesting data yields a flat forest —
+    backward compatible. Each node gains 'children' and a 'roll' (subtree totals)."""
+    by_id = {n["obs"]: n for n in nodes if n.get("obs")}
+    roots = []
+    for n in nodes:
+        n["children"] = []
+    for n in nodes:
+        par = by_id.get(n.get("parent"))
+        (par["children"] if par and par is not n else roots).append(n)
+
+    def roll(n):
+        cost, tokn, out, dur = _cost(n["model"], n["in"], n["out"]), n["in"] + n["out"], n["out"], n["dur"]
+        for ch in n["children"]:
+            r = roll(ch)
+            cost += r["cost"]; tokn += r["tok"]; out += r["out"]; dur += r["dur"]
+        n["roll"] = {"cost": round(cost, 4), "tok": tokn, "out": out, "dur": round(dur, 3)}
+        return n["roll"]
+    for r in roots:
+        roll(r)
+    return roots
+
+
 def stats(view=None):
     w, p = _scope(view)
     aw = (w + " AND" if w else " WHERE") + " waste IN('cache_saved','runaway_loop','downgraded')"
@@ -322,6 +362,7 @@ def stats(view=None):
     row = cur.execute("SELECT COUNT(*), COALESCE(SUM(in_tok+out_tok),0), COALESCE(SUM(cost),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(dur),0) FROM traces" + w, p).fetchone()
     by_agent = cur.execute("SELECT agent, COUNT(*), SUM(in_tok+out_tok), ROUND(SUM(cost),4), COALESCE(SUM(out_tok),0), COALESCE(SUM(dur),0) FROM traces" + w + " GROUP BY agent ORDER BY 4 DESC", p).fetchall()
     by_waste = cur.execute("SELECT COALESCE(NULLIF(waste,''),'productive'), COUNT(*), ROUND(SUM(cost),4) FROM traces" + w + " GROUP BY 1 ORDER BY 3 DESC", p).fetchall()
+    by_kind = cur.execute("SELECT COALESCE(NULLIF(kind,''),'generation'), COUNT(*) FROM traces" + w + " GROUP BY 1 ORDER BY 2 DESC", p).fetchall()
     saved = cur.execute("SELECT COUNT(*) FROM traces" + aw, p).fetchone()[0]
     c.close()
     # out_tps = output tokens per second of model wall-clock — the fleet's throughput,
@@ -333,19 +374,24 @@ def stats(view=None):
             "by_agent": [{"agent": a, "calls": n, "tokens": t, "cost": co, "out_tok": ot,
                           "tps": round(ot / d, 1) if d else 0, "owner": AGENT_OWNER.get(a, "unassigned")}
                          for a, n, t, co, ot, d in by_agent],
-            "by_waste": [{"kind": k, "calls": n, "cost": co} for k, n, co in by_waste]}
+            "by_waste": [{"kind": k, "calls": n, "cost": co} for k, n, co in by_waste],
+            "by_kind": [{"kind": k, "calls": n} for k, n in by_kind]}
 
 
 def channel(agent):
     c = _db()
-    rows = c.execute("SELECT session,model_out,in_tok,out_tok,COALESCE(tool,''),action,COALESCE(dur,0) FROM traces WHERE agent=? ORDER BY id", (agent,)).fetchall()
+    rows = c.execute("SELECT session,model_out,in_tok,out_tok,COALESCE(tool,''),action,COALESCE(dur,0),"
+                     "COALESCE(obs_id,''),COALESCE(parent_id,''),COALESCE(kind,'generation') FROM traces WHERE agent=? ORDER BY id", (agent,)).fetchall()
     c.close()
     runs = {}
-    for sess, model, in_tok, out_tok, tool, action, dur in rows:
-        runs.setdefault(sess, []).append({"model": model, "in": in_tok, "out": out_tok, "tool": tool, "action": action, "dur": round(dur, 3)})
+    for sess, model, in_tok, out_tok, tool, action, dur, obs, parent, kind in rows:
+        runs.setdefault(sess, []).append({"model": model, "in": in_tok, "out": out_tok, "tool": tool, "action": action,
+                                          "dur": round(dur, 3), "obs": obs, "parent": parent, "kind": kind})
     rl = [{"session": k, "turns": v} for k, v in runs.items()]
     rl.sort(key=lambda r: -len(r["turns"]))
     detail = rl[0] if rl else None
+    if detail:  # build the observation tree on copies so 'turns' stays a flat step-trace
+        detail = {**detail, "tree": _tree([dict(t) for t in detail["turns"]])}
     peak = max((t["in"] for r in rl for t in r["turns"]), default=0)
     avg_turns = round(sum(len(r["turns"]) for r in rl) / len(rl), 1) if rl else 0
     cost = round(sum(_cost(t["model"], t["in"], t["out"]) for r in rl for t in r["turns"]), 4)
@@ -359,9 +405,9 @@ def channel(agent):
 def traces(view=None, limit=40):
     w, p = _scope(view)
     c = _db()
-    rows = c.execute("SELECT ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,COALESCE(dur,0) FROM traces" + w + " ORDER BY id DESC LIMIT ?", p + [limit]).fetchall()
+    rows = c.execute("SELECT ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,COALESCE(dur,0),COALESCE(kind,'generation') FROM traces" + w + " ORDER BY id DESC LIMIT ?", p + [limit]).fetchall()
     c.close()
-    cols = ["ts", "agent", "session", "model_in", "model_out", "action", "in_tok", "out_tok", "cost", "waste", "dur"]
+    cols = ["ts", "agent", "session", "model_in", "model_out", "action", "in_tok", "out_tok", "cost", "waste", "dur", "kind"]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -392,7 +438,11 @@ class H(BaseHTTPRequestHandler):
         tenant = ik["tenant"] if ik else self.headers.get("x-vestal-tenant", "")
         corr = self.headers.get("x-vestal-corr", "")
         session = self.headers.get("x-vestal-session", "default")
-        return agent, tenant, corr, session
+        # observation tree: this call's id + its parent's, so sub-agents/tools nest
+        # (LangChain's run_id/parent_run_id convention, owned by the calling agent)
+        obs = self.headers.get("x-vestal-obs", "")
+        parent = self.headers.get("x-vestal-parent", "")
+        return agent, tenant, corr, session, obs, parent
 
     def _session(self):
         c = SimpleCookie(self.headers.get("Cookie", ""))
@@ -460,17 +510,18 @@ class H(BaseHTTPRequestHandler):
             return self._send({"ok": True, "config": CONFIG})
         if self.path.startswith("/v_keys"):
             return self._send(create_key(body.get("tenant", ""), body.get("team", ""), body.get("agent", "")))
-        agent, tenant, corr, session = self._ident()
+        agent, tenant, corr, session, obs, parent = self._ident()
         if self.path.startswith("/v_ingest"):
             record(body.get("agent", agent), body.get("session", session), body.get("model"), body.get("model"),
                    body.get("action", "FORWARD"), body.get("in_tok", 0), body.get("out_tok", 0), body.get("waste", ""),
-                   "", body.get("tenant", tenant), body.get("corr", corr), body.get("dur", 0.0))
+                   body.get("tool", ""), body.get("tenant", tenant), body.get("corr", corr), body.get("dur", 0.0),
+                   body.get("obs", obs), body.get("parent", parent), body.get("kind", ""))
             return self._send({"ok": True})
         if "/models/" in self.path and ":generateContent" in self.path:
             model = self.path.split("/models/")[1].split(":")[0]
-            return self._send(intercept_gemini(model, body, body.get("_agent", agent), session, tenant, corr))
+            return self._send(intercept_gemini(model, body, body.get("_agent", agent), session, tenant, corr, parent, obs))
         try:
-            resp = intercept(body, agent, session, tenant, corr)
+            resp = intercept(body, agent, session, tenant, corr, parent, obs)
             if body.get("stream"):
                 self.send_response(200)
                 self.send_header("content-type", "text/event-stream")
