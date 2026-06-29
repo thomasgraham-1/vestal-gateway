@@ -15,11 +15,20 @@ random.seed(7)
 BASE = "http://127.0.0.1:8788"
 
 
+def _dur(model, out_tok):
+    """Synthetic but realistic latency: base + generation time at a model-typical
+    output speed (tok/s). Fast small models clear quickly; big models are slower per
+    token — so the seeded fleet shows a real throughput spread on the dashboard."""
+    m = model.lower()
+    spd = 180 if "flash" in m else 130 if "haiku" in m else 45 if "opus" in m else 90
+    return round(random.uniform(0.3, 0.8) + out_tok / spd, 3)
+
+
 def ingest(agent, model, calls, lo, hi, corr=""):
     """Record observability-only traces for an agent we don't proxy directly."""
     for _ in range(calls):
         it, ot = random.randint(lo, hi), random.randint(lo // 4, hi // 4)
-        gateway.record(agent, f"{agent}-{corr or 'run'}", model, model, "FORWARD", it, ot, "")
+        gateway.record(agent, f"{agent}-{corr or 'run'}", model, model, "FORWARD", it, ot, "", dur=_dur(model, ot))
 
 
 def seed():
@@ -38,14 +47,17 @@ def seed():
     ctx = 4000
     for i in range(14):
         ctx = int(ctx * 1.35)  # context balloons every turn — re-sent each call
+        out = random.randint(300, 900)
         gateway.record("report_writer", sess, "claude-opus-4-8", "claude-opus-4-8",
-                       "FORWARD", ctx, random.randint(300, 900),
-                       "loop" if i > 4 else "", tool="read_file:report.md" if i % 2 else "read_file:notes.md")
+                       "FORWARD", ctx, out, "loop" if i > 4 else "",
+                       tool="read_file:report.md" if i % 2 else "read_file:notes.md",
+                       dur=_dur("claude-opus-4-8", out))
 
     # --- a runaway loop on a pricey model ---
     for i in range(11):
         gateway.record("code_reviewer", "code_reviewer-pr-204", "claude-opus-4-8", "claude-opus-4-8",
-                       "FORWARD", 6000, 400, "loop" if i > 4 else "", tool="read_file:diff.patch")
+                       "FORWARD", 6000, 400, "loop" if i > 4 else "", tool="read_file:diff.patch",
+                       dur=_dur("claude-opus-4-8", 400))
     return gateway.DB
 
 

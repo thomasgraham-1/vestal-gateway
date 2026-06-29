@@ -14,7 +14,7 @@
   .brand{font-family:var(--mono);font-weight:600;letter-spacing:.18em;color:var(--txt);font-size:14px}
   .stat{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
   .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
-  .readouts{display:grid;grid-template-columns:repeat(5,1fr)}
+  .readouts{display:grid;grid-template-columns:repeat(6,1fr)}
   .ro{padding:14px 16px;border-right:1px solid var(--line2)}
   .ro .v{font-family:var(--mono);font-size:22px;margin-top:5px;color:var(--txt)}
   .body{display:grid;grid-template-columns:40% 60%;border-top:1px solid var(--line)}
@@ -50,6 +50,7 @@
     <div class="ro"><div class="upper">Fleet spend</div><div class="v" id="r_cost">—</div></div>
     <div class="ro"><div class="upper">Model calls</div><div class="v" id="r_calls">—</div></div>
     <div class="ro"><div class="upper">Tokens</div><div class="v" id="r_tok">—</div></div>
+    <div class="ro"><div class="upper">Output tok/s</div><div class="v" id="r_tps">—</div></div>
     <div class="ro"><div class="upper">Control actions</div><div class="v" id="r_valve">—</div></div>
     <div class="ro" style="border-right:none"><div class="upper">Recoverable</div><div class="v" id="r_rec">—</div></div>
   </div>
@@ -85,7 +86,7 @@ async function tick(){
   const waste=Object.fromEntries(s.by_waste.map(w=>[w.kind,w.cost]));
   const rec=((waste.loop||0)+(waste.runaway_loop||0))/(s.cost||1);
   $('#r_cost').textContent=usd(s.cost);$('#r_calls').textContent=num(s.calls);
-  $('#r_tok').textContent=tok(s.tokens);$('#r_valve').textContent=num(s.saved_actions);
+  $('#r_tok').textContent=tok(s.tokens);$('#r_tps').textContent=num(s.out_tps);$('#r_valve').textContent=num(s.saved_actions);
   $('#r_rec').textContent=Math.round(rec*100)+'%';$('#r_rec').style.color=rec>0.3?'var(--sig)':'var(--txt)';
   $('#sdot').style.background=rec>0.3?'var(--sig)':'var(--txt2)';
   $('#sstat').textContent=rec>0.3?Math.round(rec*100)+'% recoverable waste':'fleet nominal';
@@ -146,7 +147,8 @@ async function showDetail(agent){
       <td style="color:var(--txt2)">${t.model||''}</td>
       <td style="color:${rep?'var(--sig)':'var(--txt2)'}">${t.tool||'—'}${rep?' ◂ repeat':''}</td>
       <td style="color:var(--txt);text-align:right">${(t.in).toLocaleString()}</td>
-      <td style="color:var(--txt2);text-align:right">${t.out}</td></tr>`}).join('');
+      <td style="color:var(--txt2);text-align:right">${t.out}</td>
+      <td style="color:var(--txt2);text-align:right">${t.dur>0?Math.round(t.out/t.dur):'—'}</td></tr>`}).join('');
   const grow=ctx.length>1&&ctx[0]>0?(ctx[ctx.length-1]/ctx[0]).toFixed(1)+'×':'—';
   document.querySelector('.body').style.display='none';$('#ctrlpanel').style.display='none';
   const d=document.getElementById('detail');d.style.display='block';
@@ -156,7 +158,7 @@ async function showDetail(agent){
       <span class="mono" style="font-size:14px;letter-spacing:.06em">CHANNEL · ${agent}</span></div>
     <div style="display:flex;gap:18px">
       <span class="chip">RUNS <b>${c.runs}</b></span><span class="chip">AVG CALLS/RUN <b>${c.avg_turns}</b></span>
-      <span class="chip">PEAK CTX <b>${c.peak.toLocaleString()}</b></span><span class="chip">SPEND <b>$${c.cost.toFixed(3)}</b></span></div>
+      <span class="chip">PEAK CTX <b>${c.peak.toLocaleString()}</b></span><span class="chip">THROUGHPUT <b>${num(c.tps)} tok/s</b></span><span class="chip">SPEND <b>$${c.cost.toFixed(3)}</b></span></div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)">
     <div style="border-right:1px solid var(--line)"><div class="upper" style="padding:12px 16px 2px">Context size / turn · grows ${grow}</div>${svgLine(ctx,'PEAK CONTEXT')}</div>
@@ -164,7 +166,7 @@ async function showDetail(agent){
       <div style="display:flex;align-items:flex-end;gap:3px;height:120px;padding:8px 16px 12px">${tot.map(v=>`<div style="flex:1;background:var(--bar);height:${Math.max(3,100*v/maxbar)}%"></div>`).join('')}</div></div>
   </div>
   <div class="upper" style="padding:12px 16px 6px">Step trace · longest run (${turns.length} calls)</div>
-  <table class="strace"><tr><th>#</th><th>Action</th><th>Model</th><th>Tool</th><th style="text-align:right">In</th><th style="text-align:right">Out</th></tr>${rows}</table>`;
+  <table class="strace"><tr><th>#</th><th>Action</th><th>Model</th><th>Tool</th><th style="text-align:right">In</th><th style="text-align:right">Out</th><th style="text-align:right">tok/s</th></tr>${rows}</table>`;
 }
 function showFleet(){document.getElementById('detail').style.display='none';document.querySelector('.body').style.display='grid';if(IS_ADMIN)$('#ctrlpanel').style.display='block';tick();}
 document.getElementById('chan').addEventListener('click',e=>{const it=e.target.closest('.chan-item');if(it)showDetail(it.dataset.agent);});

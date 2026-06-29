@@ -72,7 +72,12 @@ def _db():
     c.execute("""CREATE TABLE IF NOT EXISTS traces(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, agent TEXT, session TEXT,
         model_in TEXT, model_out TEXT, action TEXT, in_tok INT, out_tok INT,
-        cost REAL, waste TEXT, tool TEXT, tenant TEXT, corr TEXT)""")
+        cost REAL, waste TEXT, tool TEXT, tenant TEXT, corr TEXT, dur REAL DEFAULT 0)""")
+    # dur = wall-clock seconds the upstream call took. Captured here at the chokepoint
+    # (nowhere else can), it's what turns the meter from spend-only into a throughput
+    # meter: out_tok / dur is tokens/sec of useful output. Migrate stores that predate it.
+    if "dur" not in [r[1] for r in c.execute("PRAGMA table_info(traces)").fetchall()]:
+        c.execute("ALTER TABLE traces ADD COLUMN dur REAL DEFAULT 0")
     c.execute("""CREATE TABLE IF NOT EXISTS keys(
         vk TEXT PRIMARY KEY, tenant TEXT, team TEXT, agent TEXT, created REAL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS users(
@@ -165,16 +170,17 @@ def _cost(model, in_tok, out_tok):
     return round(in_tok / 1e6 * pin + out_tok / 1e6 * pout, 6)
 
 
-def record(agent, session, model_in, model_out, action, in_tok, out_tok, waste, tool="", tenant="", corr=""):
+def record(agent, session, model_in, model_out, action, in_tok, out_tok, waste, tool="", tenant="", corr="", dur=0.0):
     cost = _cost(model_out, in_tok, out_tok)
     with _lock:
         c = _db()
-        c.execute("INSERT INTO traces(ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,tool,tenant,corr)"
-                  " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (time.time(), agent, session, model_in, model_out, action, in_tok, out_tok, cost, waste, tool, tenant, corr))
+        c.execute("INSERT INTO traces(ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,tool,tenant,corr,dur)"
+                  " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (time.time(), agent, session, model_in, model_out, action, in_tok, out_tok, cost, waste, tool, tenant, corr, dur))
         c.commit(); c.close()
+    tps = out_tok / dur if dur > 0 else 0
     print(f"    [vestal] agent={agent} action={action} model={model_out} "
-          f"tok={in_tok}/{out_tok} ${cost} waste={waste or '-'}", flush=True)
+          f"tok={in_tok}/{out_tok} ${cost} {dur * 1000:.0f}ms {tps:.0f}tok/s waste={waste or '-'}", flush=True)
     return cost
 
 
@@ -247,13 +253,15 @@ def intercept(body, agent, session, tenant="", corr=""):
 
     model_out = CONFIG["route_map"].get(model_in, model_in)
     body["model"] = model_out
+    t0 = time.time()
     resp = _real(body) if API_KEY else _mock(body)
+    dur = time.time() - t0  # the only place wall-clock per call can be measured
     u = resp.get("usage", {})
     waste = "downgraded" if model_out != model_in else ("loop" if n > 4 else "")
     tu = next((b for b in resp.get("content", []) if b.get("type") == "tool_use"), None)
     tool = f"{tu['name']}:{tu.get('input', {}).get('path', '')}" if tu else ""
     record(agent, session, model_in, model_out, "MODEL_SWAP" if model_out != model_in else "FORWARD",
-           u.get("input_tokens", 0), u.get("output_tokens", 0), waste, tool, tenant, corr)
+           u.get("input_tokens", 0), u.get("output_tokens", 0), waste, tool, tenant, corr, dur)
     if CONFIG["cache"]:
         _cache[ck] = resp
     return resp
@@ -292,13 +300,15 @@ def intercept_gemini(model_in, body, agent, session, tenant="", corr=""):
         return _cache[ck]
 
     model_out = CONFIG["route_map"].get(model_in, model_in)
+    t0 = time.time()
     resp = _gem_real(model_out, body) if GEMINI_KEY else _gem_mock(model_out, body)
+    dur = time.time() - t0
     u = resp.get("usageMetadata", {})
     waste = "downgraded" if model_out != model_in else ("loop" if n > 4 else "")
     fc = next((p["functionCall"] for p in resp["candidates"][0]["content"]["parts"] if "functionCall" in p), None)
     tool = f"{fc['name']}:{fc.get('args', {}).get('path', '')}" if fc else ""
     record(agent, session, model_in, model_out, "MODEL_SWAP" if model_out != model_in else "FORWARD",
-           u.get("promptTokenCount", 0), u.get("candidatesTokenCount", 0), waste, tool, tenant, corr)
+           u.get("promptTokenCount", 0), u.get("candidatesTokenCount", 0), waste, tool, tenant, corr, dur)
     if CONFIG["cache"]:
         _cache[ck] = resp
     return resp
@@ -309,38 +319,49 @@ def stats(view=None):
     w, p = _scope(view)
     aw = (w + " AND" if w else " WHERE") + " waste IN('cache_saved','runaway_loop','downgraded')"
     c = _db(); cur = c.cursor()
-    row = cur.execute("SELECT COUNT(*), COALESCE(SUM(in_tok+out_tok),0), COALESCE(SUM(cost),0) FROM traces" + w, p).fetchone()
-    by_agent = cur.execute("SELECT agent, COUNT(*), SUM(in_tok+out_tok), ROUND(SUM(cost),4) FROM traces" + w + " GROUP BY agent ORDER BY 4 DESC", p).fetchall()
+    row = cur.execute("SELECT COUNT(*), COALESCE(SUM(in_tok+out_tok),0), COALESCE(SUM(cost),0), COALESCE(SUM(out_tok),0), COALESCE(SUM(dur),0) FROM traces" + w, p).fetchone()
+    by_agent = cur.execute("SELECT agent, COUNT(*), SUM(in_tok+out_tok), ROUND(SUM(cost),4), COALESCE(SUM(out_tok),0), COALESCE(SUM(dur),0) FROM traces" + w + " GROUP BY agent ORDER BY 4 DESC", p).fetchall()
     by_waste = cur.execute("SELECT COALESCE(NULLIF(waste,''),'productive'), COUNT(*), ROUND(SUM(cost),4) FROM traces" + w + " GROUP BY 1 ORDER BY 3 DESC", p).fetchall()
     saved = cur.execute("SELECT COUNT(*) FROM traces" + aw, p).fetchone()[0]
     c.close()
+    # out_tps = output tokens per second of model wall-clock — the fleet's throughput,
+    # the opportunity-cost metric that spend-only meters miss. Only rows that actually
+    # ran upstream carry dur>0 (cache hits / loop kills are instant), so they don't dilute it.
+    out_tps = round(row[3] / row[4], 1) if row[4] else 0
     return {"view": view or "admin", "calls": row[0], "tokens": row[1], "cost": round(row[2], 4), "saved_actions": saved,
-            "by_agent": [{"agent": a, "calls": n, "tokens": t, "cost": co, "owner": AGENT_OWNER.get(a, "unassigned")} for a, n, t, co in by_agent],
+            "out_tok": row[3], "gen_secs": round(row[4], 1), "out_tps": out_tps,
+            "by_agent": [{"agent": a, "calls": n, "tokens": t, "cost": co, "out_tok": ot,
+                          "tps": round(ot / d, 1) if d else 0, "owner": AGENT_OWNER.get(a, "unassigned")}
+                         for a, n, t, co, ot, d in by_agent],
             "by_waste": [{"kind": k, "calls": n, "cost": co} for k, n, co in by_waste]}
 
 
 def channel(agent):
     c = _db()
-    rows = c.execute("SELECT session,model_out,in_tok,out_tok,COALESCE(tool,''),action FROM traces WHERE agent=? ORDER BY id", (agent,)).fetchall()
+    rows = c.execute("SELECT session,model_out,in_tok,out_tok,COALESCE(tool,''),action,COALESCE(dur,0) FROM traces WHERE agent=? ORDER BY id", (agent,)).fetchall()
     c.close()
     runs = {}
-    for sess, model, in_tok, out_tok, tool, action in rows:
-        runs.setdefault(sess, []).append({"model": model, "in": in_tok, "out": out_tok, "tool": tool, "action": action})
+    for sess, model, in_tok, out_tok, tool, action, dur in rows:
+        runs.setdefault(sess, []).append({"model": model, "in": in_tok, "out": out_tok, "tool": tool, "action": action, "dur": round(dur, 3)})
     rl = [{"session": k, "turns": v} for k, v in runs.items()]
     rl.sort(key=lambda r: -len(r["turns"]))
     detail = rl[0] if rl else None
     peak = max((t["in"] for r in rl for t in r["turns"]), default=0)
     avg_turns = round(sum(len(r["turns"]) for r in rl) / len(rl), 1) if rl else 0
     cost = round(sum(_cost(t["model"], t["in"], t["out"]) for r in rl for t in r["turns"]), 4)
-    return {"agent": agent, "runs": len(rl), "avg_turns": avg_turns, "peak": peak, "cost": cost, "detail": detail}
+    out_sum = sum(t["out"] for r in rl for t in r["turns"])
+    dur_sum = sum(t["dur"] for r in rl for t in r["turns"])
+    tps = round(out_sum / dur_sum, 1) if dur_sum else 0
+    return {"agent": agent, "runs": len(rl), "avg_turns": avg_turns, "peak": peak, "cost": cost,
+            "tps": tps, "gen_secs": round(dur_sum, 1), "detail": detail}
 
 
 def traces(view=None, limit=40):
     w, p = _scope(view)
     c = _db()
-    rows = c.execute("SELECT ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste FROM traces" + w + " ORDER BY id DESC LIMIT ?", p + [limit]).fetchall()
+    rows = c.execute("SELECT ts,agent,session,model_in,model_out,action,in_tok,out_tok,cost,waste,COALESCE(dur,0) FROM traces" + w + " ORDER BY id DESC LIMIT ?", p + [limit]).fetchall()
     c.close()
-    cols = ["ts", "agent", "session", "model_in", "model_out", "action", "in_tok", "out_tok", "cost", "waste"]
+    cols = ["ts", "agent", "session", "model_in", "model_out", "action", "in_tok", "out_tok", "cost", "waste", "dur"]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -443,7 +464,7 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/v_ingest"):
             record(body.get("agent", agent), body.get("session", session), body.get("model"), body.get("model"),
                    body.get("action", "FORWARD"), body.get("in_tok", 0), body.get("out_tok", 0), body.get("waste", ""),
-                   "", body.get("tenant", tenant), body.get("corr", corr))
+                   "", body.get("tenant", tenant), body.get("corr", corr), body.get("dur", 0.0))
             return self._send({"ok": True})
         if "/models/" in self.path and ":generateContent" in self.path:
             model = self.path.split("/models/")[1].split(":")[0]

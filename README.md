@@ -50,6 +50,10 @@ works fully offline.
 - **Meter** — a trace per call (tokens, cost, model, latency, tool, action),
   stored in sqlite, rolled up by owner / agent. Role-scoped: an admin sees the
   whole org; a non-admin is locked to their own agents, enforced server-side.
+- **Throughput** — because the gateway times the upstream call, every trace also
+  carries duration, so the meter surfaces **output tokens/sec** per agent and across
+  the fleet — the velocity/opportunity-cost lens, not just spend. Cache hits and
+  loop kills are instant (dur 0) and don't dilute it.
 - **Proxy** — Anthropic (`/v1/messages`, streaming or not) and Gemini
   (`/v1beta/models/<m>:generateContent`) compatible. Forwards to the real API
   when a key is set, otherwise mocks.
