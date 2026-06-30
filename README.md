@@ -1,12 +1,12 @@
 # Vestal Gateway
 
-**An open-source meter for enterprise agent fleets.**
+**An open-source meter for AI agent fleets.**
 
 Vestal sits at the one seam every agent shares — the model call — and makes agent
 spend visible. Point your agents at it and every call is metered: tokens, cost,
-model, latency, tools, the sub-agent/turn tree, rolled up by person, team, and
-agent. Basic gateway controls (response cache, runaway-loop kill, model routing)
-are built in and toggle live.
+model, latency, throughput, tools, the sub-agent/turn tree, rolled up by person,
+team, and agent. Basic gateway controls (response cache, runaway-loop kill, model
+routing) are built in and toggle live.
 
 Drop-in and API-compatible. No process rewrites — just repoint a base URL.
 
@@ -18,14 +18,21 @@ agent ──▶ vestal gateway ──▶ model provider
 
 ## Why
 
-Teams are spending fast and blind on coding agents. Orchestration engines see a
-task's duration — never tokens, waste, or the sub-agents an agent spawns in code.
-Generic LLM-observability sits *beside* the calls. Vestal sits *astride* them, at
-the model call, so the same chokepoint both measures spend and can act on it.
+An agent is a brilliant new hire with amnesia. For one-off, judgment-heavy work
+that genius is worth it — but for repetitive tasks you're paying it to relearn the
+same job every run, and most teams are spending fast and blind, with no idea how
+much of the bill is exactly that.
+
+Orchestration engines see a task's duration — never tokens, waste, or the
+sub-agents an agent spawns in code. Generic LLM-observability sits *beside* the
+calls. Vestal sits *astride* them, at the model call, so the same chokepoint that
+measures spend can also act on it — cache, right-size, kill runaway loops, and
+(where this is headed) flag the deterministic workloads that should just be code.
 
 ## Quickstart
 
-No dependencies — Python 3.10+ standard library only.
+No dependencies, no API key, no signup — Python 3.10+ standard library only, and
+it runs fully offline (deterministic mocks when no key is set).
 
 ```bash
 git clone https://github.com/thomasgraham-1/vestal-gateway
@@ -92,6 +99,12 @@ self-contained and stdlib-only so it's easy to audit and self-host on the
 critical path. The recommendation engine that decides *which* control to pull,
 shadow-tests it before proposing it, and ties spend to outcomes is a separate,
 commercial product built on top of this gateway.
+
+The line is simple: **measurement is open, judgment is commercial.** Any number
+you can read straight off a call lives in this repo; the engine that recommends an
+action or projects the savings is the paid layer.
+
+The thesis, and a savings-report waitlist: <https://thomasgraham-1.github.io/vestal-site>
 
 ## License
 
